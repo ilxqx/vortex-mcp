@@ -4,16 +4,14 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/ilxqx/vortex-mcp/internal/config"
+	"github.com/ilxqx/vortex-mcp/internal/sshpool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/pkg/sftp"
-	gossh "golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/agent"
 )
 
 const (
@@ -67,37 +65,36 @@ func Register(s *mcp.Server) {
 	)
 }
 
-type resolvedConfig struct {
-	Host     string
-	Port     int
-	User     string
-	Password string
-	KeyFile  string
-}
-
-func resolveConfig(serverName string) (*resolvedConfig, error) {
+func getPoolConfig(serverName string) (*sshpool.Config, *config.ServerConfig, error) {
 	if serverName == "" {
-		return nil, fmt.Errorf("server name is required")
+		return nil, nil, fmt.Errorf("server name is required")
 	}
 
 	serverCfg, err := config.GetServer(serverName)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	cfg := &resolvedConfig{
+	port := serverCfg.Port
+	if port == 0 {
+		port = defaultSSHPort
+	}
+
+	timeout := serverCfg.Timeout
+	if timeout == 0 {
+		timeout = defaultSSHTimeout
+	}
+
+	poolCfg := &sshpool.Config{
 		Host:     serverCfg.Host,
-		Port:     serverCfg.Port,
+		Port:     port,
 		User:     serverCfg.User,
 		Password: serverCfg.Password,
 		KeyFile:  serverCfg.KeyFile,
+		Timeout:  time.Duration(timeout) * time.Second,
 	}
 
-	if cfg.Port == 0 {
-		cfg.Port = defaultSSHPort
-	}
-
-	return cfg, nil
+	return poolCfg, serverCfg, nil
 }
 
 func executeUpload(ctx context.Context, req *mcp.CallToolRequest, input UploadInput) (*mcp.CallToolResult, UploadOutput, error) {
@@ -105,7 +102,7 @@ func executeUpload(ctx context.Context, req *mcp.CallToolRequest, input UploadIn
 		return nil, UploadOutput{}, fmt.Errorf("local_path and remote_path are required")
 	}
 
-	cfg, err := resolveConfig(input.Server)
+	poolCfg, serverCfg, err := getPoolConfig(input.Server)
 	if err != nil {
 		return nil, UploadOutput{}, err
 	}
@@ -121,11 +118,10 @@ func executeUpload(ctx context.Context, req *mcp.CallToolRequest, input UploadIn
 		return nil, UploadOutput{}, fmt.Errorf("file too large: %d bytes (max: %d bytes)", fileInfo.Size(), maxFileSize)
 	}
 
-	client, err := dialSSH(ctx, cfg)
+	client, err := sshpool.Default().Get(ctx, poolCfg)
 	if err != nil {
 		return nil, UploadOutput{}, fmt.Errorf("SSH connection failed: %w", err)
 	}
-	defer func() { _ = client.Close() }()
 
 	sftpClient, err := sftp.NewClient(client)
 	if err != nil {
@@ -152,7 +148,7 @@ func executeUpload(ctx context.Context, req *mcp.CallToolRequest, input UploadIn
 	}
 
 	return nil, UploadOutput{
-		Message:      fmt.Sprintf("Successfully uploaded %s to %s:%s", filepath.Base(input.LocalPath), cfg.Host, input.RemotePath),
+		Message:      fmt.Sprintf("Successfully uploaded %s to %s:%s", filepath.Base(input.LocalPath), serverCfg.Host, input.RemotePath),
 		BytesWritten: written,
 	}, nil
 }
@@ -162,16 +158,15 @@ func executeDownload(ctx context.Context, req *mcp.CallToolRequest, input Downlo
 		return nil, DownloadOutput{}, fmt.Errorf("remote_path and local_path are required")
 	}
 
-	cfg, err := resolveConfig(input.Server)
+	poolCfg, serverCfg, err := getPoolConfig(input.Server)
 	if err != nil {
 		return nil, DownloadOutput{}, err
 	}
 
-	client, err := dialSSH(ctx, cfg)
+	client, err := sshpool.Default().Get(ctx, poolCfg)
 	if err != nil {
 		return nil, DownloadOutput{}, fmt.Errorf("SSH connection failed: %w", err)
 	}
-	defer func() { _ = client.Close() }()
 
 	sftpClient, err := sftp.NewClient(client)
 	if err != nil {
@@ -214,83 +209,7 @@ func executeDownload(ctx context.Context, req *mcp.CallToolRequest, input Downlo
 	}
 
 	return nil, DownloadOutput{
-		Message:      fmt.Sprintf("Successfully downloaded %s:%s to %s", cfg.Host, input.RemotePath, input.LocalPath),
+		Message:      fmt.Sprintf("Successfully downloaded %s:%s to %s", serverCfg.Host, input.RemotePath, input.LocalPath),
 		BytesWritten: written,
 	}, nil
-}
-
-// Auth priority: password > key file > SSH agent
-func buildAuthMethods(cfg *resolvedConfig) ([]gossh.AuthMethod, error) {
-	var auths []gossh.AuthMethod
-
-	if cfg.Password != "" {
-		auths = append(auths, gossh.Password(cfg.Password))
-	}
-
-	if cfg.KeyFile != "" {
-		key, err := os.ReadFile(cfg.KeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read key file: %w", err)
-		}
-		signer, err := gossh.ParsePrivateKey(key)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse key file: %w", err)
-		}
-		auths = append(auths, gossh.PublicKeys(signer))
-	}
-
-	if sshAgent := getSSHAgent(); sshAgent != nil {
-		auths = append(auths, gossh.PublicKeysCallback(sshAgent.Signers))
-	}
-
-	if len(auths) == 0 {
-		return nil, fmt.Errorf("no authentication method available (password, key_file, or SSH agent required)")
-	}
-
-	return auths, nil
-}
-
-func getSSHAgent() agent.Agent {
-	socket := os.Getenv("SSH_AUTH_SOCK")
-	if socket == "" {
-		return nil
-	}
-
-	conn, err := net.Dial("unix", socket)
-	if err != nil {
-		return nil
-	}
-
-	return agent.NewClient(conn)
-}
-
-func dialSSH(ctx context.Context, cfg *resolvedConfig) (*gossh.Client, error) {
-	auths, err := buildAuthMethods(cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	timeout := time.Duration(defaultSSHTimeout) * time.Second
-	sshConfig := &gossh.ClientConfig{
-		User:            cfg.User,
-		Auth:            auths,
-		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
-		Timeout:         timeout,
-	}
-
-	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-	dialer := net.Dialer{Timeout: timeout}
-
-	conn, err := dialer.DialContext(ctx, "tcp", addr)
-	if err != nil {
-		return nil, err
-	}
-
-	c, newCh, reqs, err := gossh.NewClientConn(conn, addr, sshConfig)
-	if err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
-
-	return gossh.NewClient(c, newCh, reqs), nil
 }
