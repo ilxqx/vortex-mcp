@@ -1,0 +1,179 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Test Before Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Pull SSH test container image
+        run: docker pull testcontainers/sshd:1.3.0
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Run Tests
+        run: go test -v -race -timeout 10m ./...
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: false
+          DOCKER_HOST: unix:///var/run/docker.sock
+
+  release:
+    name: Build and Release
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 50
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Build Release Binaries
+        run: |
+          VERSION=${{ github.ref_name }}
+          COMMIT=$(git rev-parse --short HEAD)
+          BUILD_TIME=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+          LDFLAGS="-X github.com/ilxqx/vortex-mcp/pkg/version.Version=${VERSION} -X github.com/ilxqx/vortex-mcp/pkg/version.Commit=${COMMIT} -X github.com/ilxqx/vortex-mcp/pkg/version.BuildTime=${BUILD_TIME}"
+
+          mkdir -p dist
+
+          # macOS (amd64)
+          GOOS=darwin GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o dist/vortex-darwin-amd64 ./cmd/vortex
+          tar -czvf dist/vortex-darwin-amd64.tar.gz -C dist vortex-darwin-amd64
+
+          # macOS (arm64)
+          GOOS=darwin GOARCH=arm64 go build -ldflags "${LDFLAGS}" -o dist/vortex-darwin-arm64 ./cmd/vortex
+          tar -czvf dist/vortex-darwin-arm64.tar.gz -C dist vortex-darwin-arm64
+
+          # Linux (amd64)
+          GOOS=linux GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o dist/vortex-linux-amd64 ./cmd/vortex
+          tar -czvf dist/vortex-linux-amd64.tar.gz -C dist vortex-linux-amd64
+
+          # Linux (arm64)
+          GOOS=linux GOARCH=arm64 go build -ldflags "${LDFLAGS}" -o dist/vortex-linux-arm64 ./cmd/vortex
+          tar -czvf dist/vortex-linux-arm64.tar.gz -C dist vortex-linux-arm64
+
+          # Windows (amd64)
+          GOOS=windows GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o dist/vortex-windows-amd64.exe ./cmd/vortex
+          zip -j dist/vortex-windows-amd64.zip dist/vortex-windows-amd64.exe
+
+          # Generate checksums
+          cd dist
+          sha256sum *.tar.gz *.zip > checksums.txt
+
+      - name: Generate Changelog
+        id: changelog
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          CURRENT_TAG=${{ github.ref_name }}
+          PREVIOUS_TAG=$(gh api repos/${{ github.repository }}/releases \
+            --jq '.[].tag_name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))' \
+            | head -1)
+
+          if [ -n "$PREVIOUS_TAG" ]; then
+            git fetch --shallow-since="$(gh api repos/${{ github.repository }}/releases/tags/${PREVIOUS_TAG} --jq '.published_at')" || git fetch --unshallow
+          fi
+
+          echo "Generating changelog from ${PREVIOUS_TAG} to ${CURRENT_TAG}"
+
+          FEATURES=""
+          FIXES=""
+          DOCS=""
+          CHORE=""
+          REFACTOR=""
+          TEST=""
+          CI=""
+          OTHER=""
+
+          if [ -z "$PREVIOUS_TAG" ]; then
+            COMMITS=$(git log --pretty=format:"%s" $CURRENT_TAG)
+          else
+            COMMITS=$(git log --pretty=format:"%s" ${PREVIOUS_TAG}..${CURRENT_TAG})
+          fi
+
+          while IFS= read -r commit; do
+            case "$commit" in
+              feat:*|feat\(*)
+                FEATURES="${FEATURES}- ${commit#feat*: }\n"
+                ;;
+              fix:*|fix\(*)
+                FIXES="${FIXES}- ${commit#fix*: }\n"
+                ;;
+              docs:*|docs\(*)
+                DOCS="${DOCS}- ${commit#docs*: }\n"
+                ;;
+              chore:*|chore\(*)
+                CHORE="${CHORE}- ${commit#chore*: }\n"
+                ;;
+              refactor:*|refactor\(*)
+                REFACTOR="${REFACTOR}- ${commit#refactor*: }\n"
+                ;;
+              test:*|test\(*)
+                TEST="${TEST}- ${commit#test*: }\n"
+                ;;
+              ci:*|ci\(*)
+                CI="${CI}- ${commit#ci*: }\n"
+                ;;
+              *)
+                OTHER="${OTHER}- ${commit}\n"
+                ;;
+            esac
+          done <<< "$COMMITS"
+
+          CHANGELOG="## What's Changed\n\n"
+
+          [ -n "$FEATURES" ] && CHANGELOG="${CHANGELOG}### 🚀 New Features\n${FEATURES}\n"
+          [ -n "$FIXES" ] && CHANGELOG="${CHANGELOG}### 🐛 Bug Fixes\n${FIXES}\n"
+          [ -n "$REFACTOR" ] && CHANGELOG="${CHANGELOG}### ♻️ Refactoring\n${REFACTOR}\n"
+          [ -n "$CI" ] && CHANGELOG="${CHANGELOG}### 🔄 CI/CD\n${CI}\n"
+          [ -n "$TEST" ] && CHANGELOG="${CHANGELOG}### ✅ Testing\n${TEST}\n"
+          [ -n "$DOCS" ] && CHANGELOG="${CHANGELOG}### 📝 Documentation\n${DOCS}\n"
+          [ -n "$CHORE" ] && CHANGELOG="${CHANGELOG}### 🔧 Maintenance\n${CHORE}\n"
+          [ -n "$OTHER" ] && CHANGELOG="${CHANGELOG}### Other Changes\n${OTHER}\n"
+
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Release ${{ github.ref_name }}
+          body: ${{ steps.changelog.outputs.changelog }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt

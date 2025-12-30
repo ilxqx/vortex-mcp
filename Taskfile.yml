@@ -1,0 +1,129 @@
+version: '3'
+
+vars:
+  BINARY_NAME: vortex
+  BUILD_DIR: ./build
+  CMD_DIR: ./cmd/vortex
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo "dev"
+  COMMIT:
+    sh: git rev-parse --short HEAD 2>/dev/null || echo "unknown"
+  BUILD_TIME:
+    sh: date -u '+%Y-%m-%dT%H:%M:%SZ'
+  LDFLAGS: >-
+    -X github.com/ilxqx/vortex-mcp/pkg/version.Version={{.VERSION}}
+    -X github.com/ilxqx/vortex-mcp/pkg/version.Commit={{.COMMIT}}
+    -X github.com/ilxqx/vortex-mcp/pkg/version.BuildTime={{.BUILD_TIME}}
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  build:
+    desc: Build the binary
+    cmds:
+      - mkdir -p {{.BUILD_DIR}}
+      - go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BINARY_NAME}} {{.CMD_DIR}}
+    sources:
+      - "**/*.go"
+      - go.mod
+      - go.sum
+    generates:
+      - "{{.BUILD_DIR}}/{{.BINARY_NAME}}"
+
+  build:dev:
+    desc: Build for development (no optimizations)
+    cmds:
+      - mkdir -p {{.BUILD_DIR}}
+      - go build -o {{.BUILD_DIR}}/{{.BINARY_NAME}} {{.CMD_DIR}}
+
+  install:
+    desc: Install the binary to $GOPATH/bin
+    cmds:
+      - go install -ldflags "{{.LDFLAGS}}" {{.CMD_DIR}}
+
+  run:
+    desc: Run the server
+    cmds:
+      - go run {{.CMD_DIR}}
+
+  test:
+    desc: Run tests
+    cmds:
+      - go test -v ./...
+
+  test:coverage:
+    desc: Run tests with coverage
+    cmds:
+      - go test -v -coverprofile=coverage.out ./...
+      - go tool cover -html=coverage.out -o coverage.html
+
+  lint:
+    desc: Run linter
+    cmds:
+      - golangci-lint run ./...
+
+  fmt:
+    desc: Format code
+    cmds:
+      - go fmt ./...
+      - goimports -w .
+
+  tidy:
+    desc: Tidy go modules
+    cmds:
+      - go mod tidy
+
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - rm -rf {{.BUILD_DIR}}
+      - rm -f coverage.out coverage.html
+
+  release:
+    desc: Build release binaries for multiple platforms
+    cmds:
+      - task: release:darwin-amd64
+      - task: release:darwin-arm64
+      - task: release:linux-amd64
+      - task: release:linux-arm64
+      - task: release:windows-amd64
+
+  release:darwin-amd64:
+    desc: Build for macOS (amd64)
+    cmds:
+      - mkdir -p {{.BUILD_DIR}}
+      - GOOS=darwin GOARCH=amd64 go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BINARY_NAME}}-darwin-amd64 {{.CMD_DIR}}
+
+  release:darwin-arm64:
+    desc: Build for macOS (arm64)
+    cmds:
+      - mkdir -p {{.BUILD_DIR}}
+      - GOOS=darwin GOARCH=arm64 go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BINARY_NAME}}-darwin-arm64 {{.CMD_DIR}}
+
+  release:linux-amd64:
+    desc: Build for Linux (amd64)
+    cmds:
+      - mkdir -p {{.BUILD_DIR}}
+      - GOOS=linux GOARCH=amd64 go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BINARY_NAME}}-linux-amd64 {{.CMD_DIR}}
+
+  release:linux-arm64:
+    desc: Build for Linux (arm64)
+    cmds:
+      - mkdir -p {{.BUILD_DIR}}
+      - GOOS=linux GOARCH=arm64 go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BINARY_NAME}}-linux-arm64 {{.CMD_DIR}}
+
+  release:windows-amd64:
+    desc: Build for Windows (amd64)
+    cmds:
+      - mkdir -p {{.BUILD_DIR}}
+      - GOOS=windows GOARCH=amd64 go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BINARY_NAME}}-windows-amd64.exe {{.CMD_DIR}}
+
+  version:
+    desc: Show version information
+    cmds:
+      - echo "Version:{{.VERSION}}"
+      - echo "Commit:{{.COMMIT}}"
+      - echo "Build Time:{{.BUILD_TIME}}"
