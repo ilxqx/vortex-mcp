@@ -3,6 +3,7 @@ package security
 import (
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -154,7 +155,20 @@ type CommandAnalysis struct {
 }
 
 // AnalyzeCommand parses and analyzes a shell command for security risks.
+// On Windows, it uses Windows-specific analysis. On Unix-like systems, it uses
+// POSIX shell parsing.
 func AnalyzeCommand(command string) (*CommandAnalysis, error) {
+	// Use Windows-specific analysis on Windows
+	if runtime.GOOS == "windows" {
+		return analyzeWindowsCommand(command), nil
+	}
+
+	// Unix/Linux/macOS analysis using POSIX shell parser
+	return analyzeUnixCommand(command)
+}
+
+// analyzeUnixCommand performs security analysis on Unix/POSIX shell commands
+func analyzeUnixCommand(command string) (*CommandAnalysis, error) {
 	if forkBombPattern.MatchString(command) {
 		return &CommandAnalysis{
 			Command:     command,

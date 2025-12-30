@@ -19,14 +19,14 @@ const (
 )
 
 type SSHExecuteInput struct {
-	Server  string `json:"server" jsonschema:"Pre-configured server name from VORTEX_SSH_SERVERS"`
-	Command string `json:"command" jsonschema:"Shell command to execute on the remote host"`
-	Timeout int    `json:"timeout,omitempty" jsonschema:"Command timeout in seconds (default: 30)"`
+	Server  string `json:"server" jsonschema:"Name of a pre-configured SSH server. Use ssh_list_servers tool first to get available server names."`
+	Command string `json:"command" jsonschema:"Shell command to execute on the remote host. Uses the remote system's default shell."`
+	Timeout int    `json:"timeout,omitempty" jsonschema:"Command timeout in seconds. Default: 30. Set higher for long-running commands."`
 }
 
 type SSHExecuteOutput struct {
-	Output   string `json:"output" jsonschema:"Combined stdout and stderr output"`
-	ExitCode int    `json:"exit_code" jsonschema:"Command exit code (0 indicates success)"`
+	Output   string `json:"output" jsonschema:"Combined stdout and stderr output from the remote command."`
+	ExitCode int    `json:"exit_code" jsonschema:"Exit code from the remote command. 0 indicates success."`
 }
 
 func Register(s *mcp.Server) {
@@ -35,7 +35,7 @@ func Register(s *mcp.Server) {
 		&mcp.Tool{
 			Name:        "ssh_execute",
 			Title:       "Execute SSH Command",
-			Description: "Execute a shell command on a remote host via SSH. Dangerous commands (rm -rf, shutdown, etc.) are blocked for safety. Server must be pre-configured via VORTEX_SSH_SERVERS environment variable.",
+			Description: "Execute a shell command on a remote server via SSH. Use this tool when you need to run commands on remote machines. Call ssh_list_servers first to get available server names. Dangerous commands are blocked for safety.",
 		},
 		executeSSH,
 	)
@@ -45,7 +45,7 @@ func Register(s *mcp.Server) {
 		&mcp.Tool{
 			Name:        "ssh_list_servers",
 			Title:       "List SSH Servers",
-			Description: "List all pre-configured SSH servers available for connection. Returns server name, host, and user for each configured server.",
+			Description: "List all available SSH servers. Call this tool FIRST before using ssh_execute or transfer tools to get valid server names.",
 		},
 		listServers,
 	)
@@ -54,7 +54,7 @@ func Register(s *mcp.Server) {
 type ListServersInput struct{}
 
 type ListServersOutput struct {
-	Servers []config.ServerInfo `json:"servers" jsonschema:"List of configured SSH servers"`
+	Servers []config.ServerInfo `json:"servers" jsonschema:"Array of server objects with name, host, port, and user fields."`
 }
 
 func listServers(context.Context, *mcp.CallToolRequest, ListServersInput) (*mcp.CallToolResult, ListServersOutput, error) {

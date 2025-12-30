@@ -323,7 +323,7 @@ func (s *PoolTestSuite) TestConcurrentAccess() {
 
 	errCh := make(chan error, goroutines)
 
-	for i := 0; i < goroutines; i++ {
+	for range goroutines {
 		go func() {
 			client, err := s.pool.Get(s.ctx, cfg)
 			if err != nil {
@@ -343,7 +343,7 @@ func (s *PoolTestSuite) TestConcurrentAccess() {
 		}()
 	}
 
-	for i := 0; i < goroutines; i++ {
+	for range goroutines {
 		err := <-errCh
 		s.NoError(err, "Concurrent access should not error")
 	}

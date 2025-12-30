@@ -22,25 +22,25 @@ const (
 )
 
 type UploadInput struct {
-	Server     string `json:"server" jsonschema:"Pre-configured server name from VORTEX_SSH_SERVERS"`
-	LocalPath  string `json:"local_path" jsonschema:"Absolute path to the local file to upload"`
-	RemotePath string `json:"remote_path" jsonschema:"Absolute path for the remote destination"`
+	Server     string `json:"server" jsonschema:"Name of a pre-configured SSH server. Use ssh_list_servers tool first to get available server names."`
+	LocalPath  string `json:"local_path" jsonschema:"Absolute path to the local file to upload. Must be a file, not a directory."`
+	RemotePath string `json:"remote_path" jsonschema:"Absolute path for the destination on the remote server. Parent directory must exist."`
 }
 
 type UploadOutput struct {
-	Message      string `json:"message" jsonschema:"Human-readable result message"`
-	BytesWritten int64  `json:"bytes_written" jsonschema:"Number of bytes transferred"`
+	Message      string `json:"message" jsonschema:"Human-readable success message with transfer details."`
+	BytesWritten int64  `json:"bytes_written" jsonschema:"Total number of bytes transferred."`
 }
 
 type DownloadInput struct {
-	Server     string `json:"server" jsonschema:"Pre-configured server name from VORTEX_SSH_SERVERS"`
-	RemotePath string `json:"remote_path" jsonschema:"Absolute path to the remote file to download"`
-	LocalPath  string `json:"local_path" jsonschema:"Absolute path for the local destination"`
+	Server     string `json:"server" jsonschema:"Name of a pre-configured SSH server. Use ssh_list_servers tool first to get available server names."`
+	RemotePath string `json:"remote_path" jsonschema:"Absolute path to the file on the remote server. Must be a file, not a directory."`
+	LocalPath  string `json:"local_path" jsonschema:"Absolute path for the local destination. Parent directories will be created if needed."`
 }
 
 type DownloadOutput struct {
-	Message      string `json:"message" jsonschema:"Human-readable result message"`
-	BytesWritten int64  `json:"bytes_written" jsonschema:"Number of bytes transferred"`
+	Message      string `json:"message" jsonschema:"Human-readable success message with transfer details."`
+	BytesWritten int64  `json:"bytes_written" jsonschema:"Total number of bytes transferred."`
 }
 
 func Register(s *mcp.Server) {
@@ -49,7 +49,7 @@ func Register(s *mcp.Server) {
 		&mcp.Tool{
 			Name:        "transfer_upload",
 			Title:       "Upload File via SFTP",
-			Description: "Upload a local file to a remote host via SFTP. Maximum file size is 100MB. Server must be pre-configured via VORTEX_SSH_SERVERS environment variable.",
+			Description: "Upload a local file to a remote server via SFTP. Use this tool to copy files from local machine to remote servers. Maximum file size: 100MB. Call ssh_list_servers first to get available server names.",
 		},
 		executeUpload,
 	)
@@ -59,7 +59,7 @@ func Register(s *mcp.Server) {
 		&mcp.Tool{
 			Name:        "transfer_download",
 			Title:       "Download File via SFTP",
-			Description: "Download a file from a remote host to local filesystem via SFTP. Maximum file size is 100MB. Server must be pre-configured via VORTEX_SSH_SERVERS environment variable.",
+			Description: "Download a file from a remote server to local machine via SFTP. Use this tool to copy files from remote servers to local filesystem. Maximum file size: 100MB. Call ssh_list_servers first to get available server names.",
 		},
 		executeDownload,
 	)
