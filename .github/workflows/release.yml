@@ -1,53 +1,29 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*.*.*'
+  workflow_run:
+    workflows: ["Test"]
+    types:
+      - completed
 
 permissions:
   contents: write
 
 jobs:
-  test:
-    name: Test Before Release
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
-          cache: true
-          cache-dependency-path: go.sum
-
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Pull SSH test container image
-        run: docker pull testcontainers/sshd:1.3.0
-
-      - name: Download Go modules
-        run: go mod download
-
-      - name: Run Tests
-        run: go test -v -race -timeout 10m ./...
-        env:
-          TESTCONTAINERS_RYUK_DISABLED: false
-          DOCKER_HOST: unix:///var/run/docker.sock
-
   release:
     name: Build and Release
-    needs: test
     runs-on: ubuntu-latest
+    # Only run if: Test workflow succeeded AND triggered by a version tag
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      startsWith(github.event.workflow_run.head_branch, 'v') &&
+      contains(github.event.workflow_run.head_branch, '.')
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
         with:
+          ref: ${{ github.event.workflow_run.head_branch }}
           fetch-depth: 50
 
       - name: Setup Go
@@ -59,7 +35,7 @@ jobs:
 
       - name: Build Release Binaries
         run: |
-          VERSION=${{ github.ref_name }}
+          VERSION=${{ github.event.workflow_run.head_branch }}
           COMMIT=$(git rev-parse --short HEAD)
           BUILD_TIME=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
           LDFLAGS="-X github.com/ilxqx/vortex-mcp/pkg/version.Version=${VERSION} -X github.com/ilxqx/vortex-mcp/pkg/version.Commit=${COMMIT} -X github.com/ilxqx/vortex-mcp/pkg/version.BuildTime=${BUILD_TIME}"
@@ -94,8 +70,8 @@ jobs:
         id: changelog
         env:
           GH_TOKEN: ${{ github.token }}
+          CURRENT_TAG: ${{ github.event.workflow_run.head_branch }}
         run: |
-          CURRENT_TAG=${{ github.ref_name }}
           PREVIOUS_TAG=$(gh api repos/${{ github.repository }}/releases \
             --jq '.[].tag_name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))' \
             | head -1)
@@ -111,6 +87,7 @@ jobs:
           DOCS=""
           CHORE=""
           REFACTOR=""
+          PERF=""
           TEST=""
           CI=""
           OTHER=""
@@ -138,6 +115,9 @@ jobs:
               refactor:*|refactor\(*)
                 REFACTOR="${REFACTOR}- ${commit#refactor*: }\n"
                 ;;
+              perf:*|perf\(*)
+                PERF="${PERF}- ${commit#perf*: }\n"
+                ;;
               test:*|test\(*)
                 TEST="${TEST}- ${commit#test*: }\n"
                 ;;
@@ -154,6 +134,7 @@ jobs:
 
           [ -n "$FEATURES" ] && CHANGELOG="${CHANGELOG}### 🚀 New Features\n${FEATURES}\n"
           [ -n "$FIXES" ] && CHANGELOG="${CHANGELOG}### 🐛 Bug Fixes\n${FIXES}\n"
+          [ -n "$PERF" ] && CHANGELOG="${CHANGELOG}### ⚡ Performance\n${PERF}\n"
           [ -n "$REFACTOR" ] && CHANGELOG="${CHANGELOG}### ♻️ Refactoring\n${REFACTOR}\n"
           [ -n "$CI" ] && CHANGELOG="${CHANGELOG}### 🔄 CI/CD\n${CI}\n"
           [ -n "$TEST" ] && CHANGELOG="${CHANGELOG}### ✅ Testing\n${TEST}\n"
@@ -168,7 +149,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: Release ${{ github.ref_name }}
+          tag_name: ${{ github.event.workflow_run.head_branch }}
+          name: Release ${{ github.event.workflow_run.head_branch }}
           body: ${{ steps.changelog.outputs.changelog }}
           generate_release_notes: true
           draft: false
