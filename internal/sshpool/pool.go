@@ -6,8 +6,10 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/puzpuzpuz/xsync/v4"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 )
@@ -30,10 +32,9 @@ type Config struct {
 
 // Pool manages a pool of SSH connections.
 type Pool struct {
-	mu          sync.RWMutex
-	clients     map[string]*pooledClient
+	clients     *xsync.Map[string, *pooledClient]
 	idleTimeout time.Duration
-	closed      bool
+	closed      atomic.Bool
 	closeCh     chan struct{}
 	wg          sync.WaitGroup
 }
@@ -41,9 +42,16 @@ type Pool struct {
 type pooledClient struct {
 	client   *ssh.Client
 	key      string
-	lastUsed time.Time
-	mu       sync.Mutex
-	closed   bool
+	lastUsed atomic.Int64
+	closed   atomic.Bool
+}
+
+func (pc *pooledClient) getLastUsed() time.Time {
+	return time.Unix(0, pc.lastUsed.Load())
+}
+
+func (pc *pooledClient) updateLastUsed() {
+	pc.lastUsed.Store(time.Now().UnixNano())
 }
 
 // Option configures the Pool.
@@ -59,7 +67,7 @@ func WithIdleTimeout(d time.Duration) Option {
 // New creates a new connection pool.
 func New(opts ...Option) *Pool {
 	p := &Pool{
-		clients:     make(map[string]*pooledClient),
+		clients:     xsync.NewMap[string, *pooledClient](),
 		idleTimeout: defaultIdleTimeout,
 		closeCh:     make(chan struct{}),
 	}
@@ -68,8 +76,7 @@ func New(opts ...Option) *Pool {
 		opt(p)
 	}
 
-	p.wg.Add(1)
-	go p.cleaner()
+	p.wg.Go(p.cleaner)
 
 	return p
 }
@@ -77,24 +84,17 @@ func New(opts ...Option) *Pool {
 // Get returns an SSH client for the given configuration.
 // If a connection exists and is healthy, it will be reused.
 func (p *Pool) Get(ctx context.Context, cfg *Config) (*ssh.Client, error) {
-	key := p.makeKey(cfg)
-
-	p.mu.RLock()
-	if p.closed {
-		p.mu.RUnlock()
+	if p.closed.Load() {
 		return nil, fmt.Errorf("pool is closed")
 	}
-	pc, exists := p.clients[key]
-	p.mu.RUnlock()
 
-	if exists {
-		pc.mu.Lock()
-		if !pc.closed && p.isHealthy(pc.client) {
-			pc.lastUsed = time.Now()
-			pc.mu.Unlock()
+	key := p.makeKey(cfg)
+
+	if pc, exists := p.clients.Load(key); exists {
+		if !pc.closed.Load() && p.isHealthy(pc.client) {
+			pc.updateLastUsed()
 			return pc.client, nil
 		}
-		pc.mu.Unlock()
 		p.remove(key)
 	}
 
@@ -103,56 +103,47 @@ func (p *Pool) Get(ctx context.Context, cfg *Config) (*ssh.Client, error) {
 		return nil, err
 	}
 
-	pc = &pooledClient{
-		client:   client,
-		key:      key,
-		lastUsed: time.Now(),
+	pc := &pooledClient{
+		client: client,
+		key:    key,
 	}
+	pc.updateLastUsed()
 
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
+	if p.closed.Load() {
 		_ = client.Close()
 		return nil, fmt.Errorf("pool is closed")
 	}
-	// Check again if another goroutine created a connection
-	if existing, ok := p.clients[key]; ok {
-		p.mu.Unlock()
+
+	// Atomically store or get existing connection
+	actual, loaded := p.clients.LoadOrStore(key, pc)
+	if loaded {
+		// Another goroutine created a connection first, use that one
 		_ = client.Close()
-		existing.mu.Lock()
-		existing.lastUsed = time.Now()
-		existing.mu.Unlock()
-		return existing.client, nil
+		actual.updateLastUsed()
+		return actual.client, nil
 	}
-	p.clients[key] = pc
-	p.mu.Unlock()
 
 	return client, nil
 }
 
 // Close closes all connections and stops the cleaner.
 func (p *Pool) Close() error {
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
-		return nil
+	if p.closed.Swap(true) {
+		return nil // Already closed
 	}
-	p.closed = true
 	close(p.closeCh)
 
 	var errs []error
-	for key, pc := range p.clients {
-		pc.mu.Lock()
-		if !pc.closed {
-			pc.closed = true
-			if err := pc.client.Close(); err != nil {
-				errs = append(errs, fmt.Errorf("closing %s: %w", key, err))
-			}
+	p.clients.Range(func(key string, pc *pooledClient) bool {
+		if pc.closed.Swap(true) {
+			return true // Already closed
 		}
-		pc.mu.Unlock()
-	}
-	p.clients = nil
-	p.mu.Unlock()
+		if err := pc.client.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("closing %s: %w", key, err))
+		}
+		return true
+	})
+	p.clients.Clear()
 
 	p.wg.Wait()
 
@@ -164,21 +155,17 @@ func (p *Pool) Close() error {
 
 // Stats returns pool statistics.
 func (p *Pool) Stats() (active int, idle int) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
 	now := time.Now()
-	for _, pc := range p.clients {
-		pc.mu.Lock()
-		if !pc.closed {
-			if now.Sub(pc.lastUsed) > p.idleTimeout {
+	p.clients.Range(func(_ string, pc *pooledClient) bool {
+		if !pc.closed.Load() {
+			if now.Sub(pc.getLastUsed()) > p.idleTimeout {
 				idle++
 			} else {
 				active++
 			}
 		}
-		pc.mu.Unlock()
-	}
+		return true
+	})
 	return
 }
 
@@ -276,27 +263,18 @@ func (p *Pool) isHealthy(client *ssh.Client) bool {
 }
 
 func (p *Pool) remove(key string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	pc, ok := p.clients[key]
-	if !ok {
+	pc, exists := p.clients.LoadAndDelete(key)
+	if !exists {
 		return
 	}
 
-	pc.mu.Lock()
-	if !pc.closed {
-		pc.closed = true
-		_ = pc.client.Close()
+	if pc.closed.Swap(true) {
+		return // Already closed
 	}
-	pc.mu.Unlock()
-
-	delete(p.clients, key)
+	_ = pc.client.Close()
 }
 
 func (p *Pool) cleaner() {
-	defer p.wg.Done()
-
 	ticker := time.NewTicker(defaultCleanInterval)
 	defer ticker.Stop()
 
@@ -311,23 +289,19 @@ func (p *Pool) cleaner() {
 }
 
 func (p *Pool) cleanIdle() {
-	p.mu.RLock()
-	if p.closed {
-		p.mu.RUnlock()
+	if p.closed.Load() {
 		return
 	}
 
 	var toRemove []string
 	now := time.Now()
 
-	for key, pc := range p.clients {
-		pc.mu.Lock()
-		if !pc.closed && now.Sub(pc.lastUsed) > p.idleTimeout {
+	p.clients.Range(func(key string, pc *pooledClient) bool {
+		if !pc.closed.Load() && now.Sub(pc.getLastUsed()) > p.idleTimeout {
 			toRemove = append(toRemove, key)
 		}
-		pc.mu.Unlock()
-	}
-	p.mu.RUnlock()
+		return true
+	})
 
 	for _, key := range toRemove {
 		p.remove(key)

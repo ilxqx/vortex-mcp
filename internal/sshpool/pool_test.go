@@ -373,7 +373,7 @@ func (s *PoolUnitTestSuite) TestNew() {
 		s.NotNil(pool, "Pool should not be nil")
 		s.Equal(defaultIdleTimeout, pool.idleTimeout, "Default idle timeout should be set")
 		s.NotNil(pool.clients, "Clients map should be initialized")
-		s.False(pool.closed, "Pool should not be closed")
+		s.False(pool.closed.Load(), "Pool should not be closed")
 	})
 
 	s.Run("WithCustomIdleTimeout", func() {
